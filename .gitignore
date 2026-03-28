@@ -28,8 +28,8 @@ ENV/
 # Logs
 logs/
 
-# Data (processed output)
-data/processed/
+# Data (pipeline output artifacts)
+data/
 
 # OS files
 .DS_Store
