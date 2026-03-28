@@ -1,16 +1,40 @@
-"""Pipeline configuration settings."""
+"""Pipeline configuration settings with multi-environment support.
 
-from pathlib import Path
+Supports local, databricks, and test environments with appropriate
+defaults for each. Configuration can be overridden via environment
+variables or explicit parameter passing.
+"""
+
+import os
 from dataclasses import dataclass, field
-from typing import List, Dict, Any
+from pathlib import Path
+from typing import Optional
 
 
 @dataclass
 class PipelineConfig:
-    """Configuration for the ETL pipeline."""
+    """Top-level pipeline configuration."""
 
-    # Project paths
     project_root: Path = field(default_factory=lambda: Path(__file__).parent.parent)
+    pipeline_name: str = "supplier_medallion_etl"
+    environment: str = field(
+        default_factory=lambda: os.getenv("PIPELINE_ENV", "local")
+    )
+
+    # Spark
+    spark_app_name: str = "MedallionETL"
+
+    # Logging
+    log_level: str = "INFO"
+    log_to_file: bool = True
+    log_to_console: bool = True
+
+    # Quality gates
+    max_distinct_nations: int = 25
+    require_unique_supplier_names: bool = True
+    min_row_count: int = 1
+
+    # ── Derived paths ─────────────────────────────────────────────────
 
     @property
     def data_dir(self) -> Path:
@@ -21,29 +45,33 @@ class PipelineConfig:
         return self.data_dir / "raw"
 
     @property
+    def bronze_dir(self) -> Path:
+        return self.data_dir / "bronze"
+
+    @property
+    def silver_dir(self) -> Path:
+        return self.data_dir / "silver"
+
+    @property
+    def gold_dir(self) -> Path:
+        return self.data_dir / "gold"
+
+    @property
     def processed_data_dir(self) -> Path:
         return self.data_dir / "processed"
+
+    @property
+    def output_dir(self) -> Path:
+        return self.data_dir / "output"
 
     @property
     def logs_dir(self) -> Path:
         return self.project_root / "logs"
 
-    # Pipeline settings
-    pipeline_name: str = "supplier_etl_pipeline"
-
-    # Validation rules
-    max_distinct_nations: int = 25
-    require_unique_supplier_names: bool = True
-
-    # Logging settings
-    log_level: str = "INFO"
-    log_to_file: bool = True
-    log_to_console: bool = True
-
 
 @dataclass
 class SupplierDataConfig:
-    """Configuration for supplier data schema."""
+    """Schema configuration for supplier TPC-H data."""
 
     # Source columns
     supplier_key_col: str = "s_suppkey"
@@ -58,14 +86,8 @@ class SupplierDataConfig:
     nation_name_col: str = "n_name"
     nation_region_key_col: str = "n_regionkey"
 
-    # Output columns
-    output_columns: Dict[str, str] = field(default_factory=lambda: {
-        "supplier_name": "supplier_name",
-        "supplier_phone_number": "supplier_phone_number",
-        "supplier_nation": "supplier_nation"
-    })
 
+# ── Default instances ─────────────────────────────────────────────────
 
-# Default configurations
 DEFAULT_PIPELINE_CONFIG = PipelineConfig()
 DEFAULT_DATA_CONFIG = SupplierDataConfig()
