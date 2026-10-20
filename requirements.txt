@@ -6,6 +6,9 @@ pandas>=2.0.0
 pytest>=7.0.0
 pytest-cov>=4.0.0
 
+# Optional: Claude as the agent-loop planner (python main.py --mode agentic --policy claude)
+# anthropic>=0.40.0
+
 # Optional: Databricks (uncomment when deploying to Databricks)
 # delta-spark>=2.4.0
 # databricks-sdk>=0.20.0

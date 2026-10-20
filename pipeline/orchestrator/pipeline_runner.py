@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.types import StructType
 
 from pipeline.bronze.ingestion import BronzeIngestion, create_bronze_schemas
 from pipeline.gold.aggregations import GoldAggregator
@@ -85,7 +86,7 @@ class MedallionPipeline:
 
         try:
             # ── BRONZE ────────────────────────────────────────────
-            suppliers_bronze, nations_bronze = self._run_bronze(
+            suppliers_bronze, nations_bronze = self.run_bronze(
                 supplier_data, nation_data
             )
             input_rows = {
@@ -94,19 +95,19 @@ class MedallionPipeline:
             }
 
             # ── Bronze quality gate ───────────────────────────────
-            self._run_bronze_quality_gate(suppliers_bronze, nations_bronze)
+            self.run_bronze_quality_gate(suppliers_bronze, nations_bronze)
 
             # ── SILVER ────────────────────────────────────────────
-            silver_df = self._run_silver(suppliers_bronze, nations_bronze)
+            silver_df = self.run_silver(suppliers_bronze, nations_bronze)
 
             # ── Silver quality gate ───────────────────────────────
-            silver_qc = self._run_silver_quality_gate(silver_df)
+            silver_qc = self.run_silver_quality_gate(silver_df)
 
             # ── GOLD ─────────────────────────────────────────────
-            gold_tables = self._run_gold(silver_df)
+            gold_tables = self.run_gold(silver_df)
 
             # ── Write outputs ─────────────────────────────────────
-            output_paths = self._write_outputs(silver_df, gold_tables)
+            output_paths = self.write_outputs(silver_df, gold_tables)
 
             logger.info("=" * 70)
             logger.info("Pipeline completed successfully in %.2fs", self.metrics.total_duration)
@@ -135,15 +136,21 @@ class MedallionPipeline:
                 error=str(exc),
             )
 
-    # ── Layer runners ─────────────────────────────────────────────────
+    # ── Layer runners (public so the agent harness can drive stages) ──────
 
-    def _run_bronze(
+    def run_bronze(
         self,
         supplier_data: dict[str, list],
         nation_data: dict[str, list],
+        schemas: Optional[dict[str, StructType]] = None,
     ) -> tuple[DataFrame, DataFrame]:
-        """Ingest raw data into Bronze layer."""
-        schemas = create_bronze_schemas()
+        """Ingest raw data into Bronze layer.
+
+        Args:
+            schemas: Optional overrides for the default Bronze schemas, e.g.
+                an evolved supplier schema carrying a `_rescued_data` column.
+        """
+        schemas = {**create_bronze_schemas(), **(schemas or {})}
 
         supplier_bronze = BronzeIngestion(self.spark, "tpch_supplier")
         nation_bronze = BronzeIngestion(self.spark, "tpch_nation")
@@ -162,7 +169,7 @@ class MedallionPipeline:
 
         return suppliers_df, nations_df
 
-    def _run_bronze_quality_gate(
+    def run_bronze_quality_gate(
         self,
         suppliers_df: DataFrame,
         nations_df: DataFrame,
@@ -181,7 +188,7 @@ class MedallionPipeline:
             )
         return checker
 
-    def _run_silver(
+    def run_silver(
         self,
         suppliers_bronze: DataFrame,
         nations_bronze: DataFrame,
@@ -194,7 +201,7 @@ class MedallionPipeline:
             m["df"] = silver_df
         return silver_df
 
-    def _run_silver_quality_gate(self, silver_df: DataFrame) -> DataQualityChecker:
+    def run_silver_quality_gate(self, silver_df: DataFrame) -> DataQualityChecker:
         """Validate Silver data before Gold aggregation."""
         checker = (
             DataQualityChecker("silver_gate")
@@ -211,7 +218,7 @@ class MedallionPipeline:
             )
         return checker
 
-    def _run_gold(self, silver_df: DataFrame) -> dict[str, DataFrame]:
+    def run_gold(self, silver_df: DataFrame) -> dict[str, DataFrame]:
         """Build Gold aggregation tables."""
         gold_tables = {}
         with self.metrics.track_stage("gold", "supplier_by_nation") as m:
@@ -228,7 +235,7 @@ class MedallionPipeline:
 
         return gold_tables
 
-    def _write_outputs(
+    def write_outputs(
         self,
         silver_df: DataFrame,
         gold_tables: dict[str, DataFrame],
