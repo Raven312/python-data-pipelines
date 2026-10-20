@@ -253,4 +253,7 @@ class DataQualityChecker:
             "passed": passed,
             "failed": failed,
             "pass_rate": round(passed / max(len(self._results), 1), 4),
+            "failures": [
+                f"{r.check_name}: {r.message}" for r in self._results if not r.passed
+            ],
         }

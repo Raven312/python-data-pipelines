@@ -9,6 +9,13 @@ Usage:
     python main.py
     python main.py --env local --log-level DEBUG
     python main.py --output data/output
+
+Agentic modes (Harness + Loop):
+    python main.py --mode agentic --auto-approve
+    python main.py --mode agentic --inject-fault transient --auto-approve
+    python main.py --mode agentic --inject-fault empty_batch
+    python main.py --mode agentic --policy claude      # needs ANTHROPIC_API_KEY
+    python main.py --mode monitor --cycles 3 --interval 5 --auto-approve
 """
 
 import argparse
@@ -43,6 +50,27 @@ def parse_args():
         default="INFO",
     )
     parser.add_argument("--no-log-file", action="store_true")
+    parser.add_argument(
+        "--mode",
+        choices=["batch", "agentic", "monitor"],
+        default="batch",
+        help="batch: classic run · agentic: agent loop drives the stages · "
+             "monitor: recurring SLA loop with agentic remediation",
+    )
+    parser.add_argument("--policy", choices=["rules", "claude"], default="rules")
+    parser.add_argument(
+        "--inject-fault",
+        choices=sorted(FAULT_SCENARIOS),
+        default=None,
+        help="Replay an incident to watch the agent recover or escalate",
+    )
+    parser.add_argument(
+        "--auto-approve",
+        action="store_true",
+        help="Approve the gated publish step without prompting",
+    )
+    parser.add_argument("--cycles", type=int, default=3, help="Monitor ticks (monitor mode)")
+    parser.add_argument("--interval", type=float, default=5.0, help="Seconds between ticks")
     return parser.parse_args()
 
 
@@ -83,6 +111,82 @@ def create_sample_data() -> tuple[dict, dict]:
     return supplier_data, nation_data
 
 
+def _drop_key(data: dict, key: str) -> dict:
+    return {k: v for k, v in data.items() if k != key}
+
+
+# Each scenario rewrites the sample batch and/or scripts stage faults.
+FAULT_SCENARIOS = {
+    "transient": lambda s, n: (s, n, {"run_silver": [RuntimeError("503 Service Unavailable: throttled")]}),
+    "empty_batch": lambda s, n: ({k: [] for k in s}, n, {}),
+    "additive_column": lambda s, n: ({**s, "s_comment": ["new field"] * len(s["s_suppkey"])}, n, {}),
+    "dropped_column": lambda s, n: (_drop_key(s, "s_phone"), n, {}),
+    "unknown_error": lambda s, n: (s, n, {"run_gold": [RuntimeError("unexpected executor state")]}),
+}
+
+
+def prompt_approver(tool_name: str, args: dict) -> bool:
+    """Human-in-the-loop gate for destructive tools."""
+    if not sys.stdin.isatty():
+        return False
+    answer = input(f"\nAgent requests '{tool_name}' {args or ''}. Approve? [y/N] ")
+    return answer.strip().lower() in ("y", "yes")
+
+
+def run_agentic(args, spark, output_dir, config) -> int:
+    from agents.harness import approve_all
+    from agents.harness.pipeline_toolkit import FaultInjector
+    from agents.loop.operator import run_agentic_pipeline
+
+    supplier_data, nation_data = create_sample_data()
+    faults = {}
+    if args.inject_fault:
+        supplier_data, nation_data, faults = FAULT_SCENARIOS[args.inject_fault](supplier_data, nation_data)
+
+    result, toolkit = run_agentic_pipeline(
+        spark, output_dir, supplier_data, nation_data,
+        policy=args.policy,
+        approver=approve_all if args.auto_approve else prompt_approver,
+        faults=FaultInjector(faults),
+        audit_path=config.logs_dir / "agent_audit.jsonl",
+        alert_sink=lambda msg: print(f"\n[ALERT] {msg}"),
+    )
+
+    print("\n" + "=" * 70)
+    print(f"Agent run ({args.policy} policy){f' — fault: {args.inject_fault}' if args.inject_fault else ''}")
+    print("=" * 70)
+    print("\n".join(result.transcript()))
+    print("\nIncident report:")
+    for key, value in result.incident_report().items():
+        print(f"  {key:<18} {value}")
+    print(f"\nAudit: {result.audit}")
+    return 0 if result.succeeded else 1
+
+
+def run_monitor(args, spark, output_dir) -> int:
+    from agents.harness import approve_all
+    from agents.loop.monitor import MonitoringLoop
+    from agents.loop.operator import make_remediation
+    from agents.sla.sla_agent import SLADefinition, SLAMonitorAgent
+
+    sla = SLAMonitorAgent(SLADefinition(name="supplier_gold", max_freshness_minutes=60))
+    remediate = make_remediation(
+        spark, output_dir,
+        load_batch=create_sample_data,
+        policy=args.policy,
+        approver=approve_all if args.auto_approve else prompt_approver,
+    )
+    monitor = MonitoringLoop(
+        sla, remediate,
+        interval_seconds=args.interval,
+        alert_sink=lambda msg: print(f"\n[ALERT] {msg}"),
+    )
+    for tick in monitor.run(cycles=args.cycles):
+        run = f" → remediation {tick.run.status}" if tick.run else ""
+        print(f"cycle {tick.cycle}: SLA {tick.sla_action} {tick.breached_metrics or ''}{run}")
+    return 0 if not monitor.escalated else 1
+
+
 def main():
     args = parse_args()
     config = DEFAULT_PIPELINE_CONFIG
@@ -104,6 +208,11 @@ def main():
     )
 
     try:
+        if args.mode == "agentic":
+            sys.exit(run_agentic(args, spark, output_dir, config))
+        if args.mode == "monitor":
+            sys.exit(run_monitor(args, spark, output_dir))
+
         supplier_data, nation_data = create_sample_data()
 
         pipeline = MedallionPipeline(
